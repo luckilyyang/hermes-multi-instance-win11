@@ -1,0 +1,264 @@
+version: '3.8'
+
+services:
+  # ===== MongoDB (中央数据库) =====
+  mongo-central:
+    image: mongo:7-alpine
+    container_name: mongo-central
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - mongo-central-data:/data/db
+      - ./mongo/init-central.js:/docker-entrypoint-initdb.d/init.js:ro
+    ports:
+      - "27017:27017"
+    networks:
+      - hermes-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Redis (缓存和 Session) =====
+  redis-central:
+    image: redis:7-alpine
+    container_name: redis-central
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis-central-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - hermes-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== 中央管理面板 =====
+  admin-dashboard:
+    build:
+      context: ./admin-dashboard
+      dockerfile: Dockerfile
+    container_name: hermes-admin-dashboard
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: 5000
+      MONGODB_URI: mongodb://admin:${MONGO_PASSWORD}@mongo-central:27017/hermes_central?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis-central:6379
+      JWT_SECRET: ${ADMIN_JWT_SECRET}
+      
+      INSTANCE_SUPER_URL: http://studio-super:6060
+      INSTANCE_LS_URL: http://studio-ls:6060
+      INSTANCE_ZS_URL: http://studio-zs:6060
+      
+      INSTANCE_SUPER_DB: postgresql://hermes:${DB_PASSWORD}@postgres-super:5432/hermes_studio
+      INSTANCE_LS_DB: postgresql://hermes:${DB_PASSWORD}@postgres-ls:5432/hermes_studio
+      INSTANCE_ZS_DB: postgresql://hermes:${DB_PASSWORD}@postgres-zs:5432/hermes_studio
+    volumes:
+      - admin-logs:/app/logs
+    depends_on:
+      mongo-central:
+        condition: service_healthy
+      redis-central:
+        condition: service_healthy
+      postgres-super:
+        condition: service_healthy
+      postgres-ls:
+        condition: service_healthy
+      postgres-zs:
+        condition: service_healthy
+    networks:
+      - hermes-network
+    restart: unless-stopped
+
+  # ===== 超级管理员实例 (super.xx.local) =====
+  studio-super:
+    image: ekkolearnai/hermes-studio:latest
+    container_name: hermes-studio-super
+    ports:
+      - "6060:6060"
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      HERMES_HOME: /data/hermes
+      HERMES_WEB_UI_HOME: /data/web-ui
+      HERMES_WEB_UI_MANAGED_GATEWAY: 1
+      AUTH_ENABLED: 1
+      AUTH_JWT_SECRET: ${JWT_SECRET_SUPER}
+      DATABASE_URL: postgresql://hermes:${DB_PASSWORD}@postgres-super:5432/hermes_studio
+      
+      CENTRAL_ADMIN_ENABLED: 1
+      CENTRAL_ADMIN_URL: http://admin-dashboard:5000
+      CENTRAL_ADMIN_SECRET: ${CENTRAL_ADMIN_SECRET}
+      INSTANCE_NAME: super
+      INSTANCE_TYPE: admin
+    volumes:
+      - hermes-data-super:/data
+    depends_on:
+      postgres-super:
+        condition: service_healthy
+    networks:
+      - hermes-network
+    restart: unless-stopped
+
+  postgres-super:
+    image: postgres:16-alpine
+    container_name: postgres-super
+    environment:
+      POSTGRES_DB: hermes_studio
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data-super:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - hermes-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes_studio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== LS 管理员实例 (ls.xx.local) =====
+  studio-ls:
+    image: ekkolearnai/hermes-studio:latest
+    container_name: hermes-studio-ls
+    ports:
+      - "6061:6060"
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      HERMES_HOME: /data/hermes
+      HERMES_WEB_UI_HOME: /data/web-ui
+      HERMES_WEB_UI_MANAGED_GATEWAY: 1
+      AUTH_ENABLED: 1
+      AUTH_JWT_SECRET: ${JWT_SECRET_LS}
+      DATABASE_URL: postgresql://hermes:${DB_PASSWORD}@postgres-ls:5432/hermes_studio
+      
+      CENTRAL_ADMIN_ENABLED: 1
+      CENTRAL_ADMIN_URL: http://admin-dashboard:5000
+      CENTRAL_ADMIN_SECRET: ${CENTRAL_ADMIN_SECRET}
+      INSTANCE_NAME: ls
+      INSTANCE_TYPE: admin
+    volumes:
+      - hermes-data-ls:/data
+    depends_on:
+      postgres-ls:
+        condition: service_healthy
+    networks:
+      - hermes-network
+    restart: unless-stopped
+
+  postgres-ls:
+    image: postgres:16-alpine
+    container_name: postgres-ls
+    environment:
+      POSTGRES_DB: hermes_studio
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data-ls:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    networks:
+      - hermes-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes_studio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== ZS 管理员实例 (zs.xx.local) =====
+  studio-zs:
+    image: ekkolearnai/hermes-studio:latest
+    container_name: hermes-studio-zs
+    ports:
+      - "6062:6060"
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      HERMES_HOME: /data/hermes
+      HERMES_WEB_UI_HOME: /data/web-ui
+      HERMES_WEB_UI_MANAGED_GATEWAY: 1
+      AUTH_ENABLED: 1
+      AUTH_JWT_SECRET: ${JWT_SECRET_ZS}
+      DATABASE_URL: postgresql://hermes:${DB_PASSWORD}@postgres-zs:5432/hermes_studio
+      
+      CENTRAL_ADMIN_ENABLED: 1
+      CENTRAL_ADMIN_URL: http://admin-dashboard:5000
+      CENTRAL_ADMIN_SECRET: ${CENTRAL_ADMIN_SECRET}
+      INSTANCE_NAME: zs
+      INSTANCE_TYPE: admin
+    volumes:
+      - hermes-data-zs:/data
+    depends_on:
+      postgres-zs:
+        condition: service_healthy
+    networks:
+      - hermes-network
+    restart: unless-stopped
+
+  postgres-zs:
+    image: postgres:16-alpine
+    container_name: postgres-zs
+    environment:
+      POSTGRES_DB: hermes_studio
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data-zs:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5434:5432"
+    networks:
+      - hermes-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes_studio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Nginx 反向代理 =====
+  nginx:
+    image: nginx:alpine
+    container_name: hermes-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - admin-dashboard
+      - studio-super
+      - studio-ls
+      - studio-zs
+    networks:
+      - hermes-network
+    restart: unless-stopped
+
+volumes:
+  hermes-data-super:
+  postgres-data-super:
+  hermes-data-ls:
+  postgres-data-ls:
+  hermes-data-zs:
+  postgres-data-zs:
+  mongo-central-data:
+  redis-central-data:
+  admin-logs:
+
+networks:
+  hermes-network:
+    driver: bridge
